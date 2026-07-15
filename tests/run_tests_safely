@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+
+set -eu
+
+CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REAL_RESURRECT_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/tmux/resurrect"
+REAL_LAST_TARGET=""
+
+if [ -L "$REAL_RESURRECT_DIR/last" ]; then
+	REAL_LAST_TARGET="$(readlink "$REAL_RESURRECT_DIR/last")"
+fi
+
+TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/tmux-resurrect-tests.XXXXXX")"
+TEST_HOME="$TEST_ROOT/home"
+TEST_XDG_DATA_HOME="$TEST_ROOT/xdg-data"
+TEST_TMUX_TMPDIR="$TEST_ROOT/tmux-sockets"
+
+cleanup() {
+	HOME="$TEST_HOME" \
+	XDG_DATA_HOME="$TEST_XDG_DATA_HOME" \
+	TMUX_TMPDIR="$TEST_TMUX_TMPDIR" \
+		tmux kill-server >/dev/null 2>&1 || true
+	rm -rf "$TEST_ROOT"
+}
+
+assert_real_last_unchanged() {
+	local current_target=""
+	if [ -L "$REAL_RESURRECT_DIR/last" ]; then
+		current_target="$(readlink "$REAL_RESURRECT_DIR/last")"
+	fi
+	if [ "$current_target" != "$REAL_LAST_TARGET" ]; then
+		printf 'real resurrect last changed: [%s] -> [%s]\n' \
+			"$REAL_LAST_TARGET" "$current_target" >&2
+		return 1
+	fi
+}
+
+trap 'status=$?; cleanup; assert_real_last_unchanged || status=1; exit $status' \
+	EXIT INT TERM
+
+mkdir -p "$TEST_HOME" "$TEST_XDG_DATA_HOME" "$TEST_TMUX_TMPDIR"
+
+HOME="$TEST_HOME" \
+XDG_DATA_HOME="$TEST_XDG_DATA_HOME" \
+TMUX_TMPDIR="$TEST_TMUX_TMPDIR" \
+TERM="${TERM:-xterm-256color}" \
+	"$CURRENT_DIR/run_tests_in_isolation" "$@"
