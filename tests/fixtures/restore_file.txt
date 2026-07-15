@@ -1,15 +1,15 @@
-pane	0	0	1	:*	0	pane-0	:/tmp	1	bash	:
-pane	blue	0	0	:	0	pane-7	:/tmp	1	vim	:vim foo.txt
-pane	blue	1	0	:-	0	pane-8	:/tmp	0	bash	:
-pane	blue	1	0	:-	1	pane-9	:/tmp	1	man	:man echo
-pane	blue	2	1	:*	0	pane-10	:/tmp	1	bash	:
-pane	red	0	0	:	0	pane-1	:/tmp	1	bash	:
-pane	red	1	0	:-Z	0	pane-2	:/tmp	0	bash	:
-pane	red	1	0	:-Z	1	pane-3	:/tmp	0	bash	:
-pane	red	1	0	:-Z	2	pane-4	:/tmp	1	bash	:
-pane	red	2	1	:*	0	pane-5	:/tmp	0	bash	:
-pane	red	2	1	:*	1	pane-6	:/tmp	1	bash	:
-pane	yellow	0	1	:*	0	_	:/tmp/bar	1	bash	:
+pane	0	0	1	:*	0	:pane-0	:/tmp	1	bash	:
+pane	blue	0	0	:	0	:pane-7	:/tmp	1	vim	:vim foo.txt
+pane	blue	1	0	:-	0	:pane-8	:/tmp	0	bash	:
+pane	blue	1	0	:-	1	:pane-9	:/tmp	1	man	:man echo
+pane	blue	2	1	:*	0	:pane-10	:/tmp	1	bash	:
+pane	red	0	0	:	0	:pane-1	:/tmp	1	bash	:
+pane	red	1	0	:-Z	0	:pane-2	:/tmp	0	bash	:
+pane	red	1	0	:-Z	1	:pane-3	:/tmp	0	bash	:
+pane	red	1	0	:-Z	2	:pane-4	:/tmp	1	bash	:
+pane	red	2	1	:*	0	:pane-5	:/tmp	0	bash	:
+pane	red	2	1	:*	1	:pane-6	:/tmp	1	bash	:
+pane	yellow	0	1	:*	0	:	:/tmp/bar	1	bash	:
 window	0	0	:bash	1	:*	ce9e,200x49,0,0,1	:
 window	blue	0	:bash	0	:	ce9f,200x49,0,0,2	:
 window	blue	1	:bash	0	:-	178b,200x49,0,0{100x49,0,0,3,99x49,101,0,4}	:
