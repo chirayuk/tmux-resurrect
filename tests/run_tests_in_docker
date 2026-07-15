@@ -23,6 +23,9 @@ build_image() {
 create_container() {
 	container_id="$(docker create \
 		--init \
+		--name "$run_id" \
+		--hostname tmux-resurrect-test \
+		--tty \
 		--network none \
 		--read-only \
 		--cap-drop ALL \
