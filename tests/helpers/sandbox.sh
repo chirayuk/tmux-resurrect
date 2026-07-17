@@ -19,8 +19,12 @@ _RESURRECT_TEST_SANDBOX_ROOT=""
 
 _resurrect_test_sandbox_cleanup() {
 	[ -n "$_RESURRECT_TEST_SANDBOX_ROOT" ] || return 0
+	# Normalize TMPDIR once: an unset TMPDIR must not collapse the allowlist
+	# arm to the bare `/*` glob (which would match any absolute path).
+	local tmpdir="${TMPDIR:-/tmp}"
+	tmpdir="${tmpdir%/}"
 	case "$_RESURRECT_TEST_SANDBOX_ROOT" in
-		/tmp/*|/var/folders/*|"${TMPDIR%/}"/*)
+		/tmp/*|/var/folders/*|"$tmpdir"/*)
 			rm -rf "$_RESURRECT_TEST_SANDBOX_ROOT"
 			;;
 		*)
@@ -52,9 +56,18 @@ activate_test_sandbox() {
 	# Idempotent: a nested source must not create a second sandbox.
 	[ -n "$_RESURRECT_TEST_SANDBOX_ROOT" ] && return 0
 
+	# Fail loudly on mktemp failure BEFORE deriving any path: the tests run
+	# with neither `set -e` nor `set -u`, so an empty sandbox_root would
+	# otherwise make HOME collapse to "/home" and slip past the assert.
 	local sandbox_root
 	sandbox_root="$(mktemp -d "${TMPDIR:-/tmp}/tmux-resurrect-test.XXXXXX")"
+	if [ ! -d "$sandbox_root" ]; then
+		printf 'sandbox: mktemp -d failed to create a sandbox root\n' >&2
+		exit 1
+	fi
 	_RESURRECT_TEST_SANDBOX_ROOT="$sandbox_root"
+	# The tmux-test framework installs no EXIT trap (teardown is explicit via
+	# exit_helper), so this trap does not clobber one; revisit if that changes.
 	trap _resurrect_test_sandbox_cleanup EXIT
 
 	local sandbox_home="$sandbox_root/home"
@@ -72,7 +85,7 @@ activate_test_sandbox() {
 	export XDG_STATE_HOME="$sandbox_home/.local/state"
 	export TMUX_TMPDIR="$sandbox_root/tmux"
 	# Never let a test attach to or inherit an outer tmux server.
-	unset TMUX
+	unset TMUX TMUX_PANE
 
 	mkdir -p \
 		"$HOME/.tmux/resurrect" \
