@@ -21,7 +21,9 @@ create_local_repository() {
 
 run_test_file() {
 	local test_file="$1"
-	mkdir -p "$HOME/.tmux/resurrect"
+	# The state directory is created inside the per-test sandbox
+	# (tests/helpers/sandbox.sh), which relocates HOME/XDG before the test
+	# writes anything; nothing needs to be prepared under the real HOME here.
 	tests/run_tests_in_isolation "$test_file"
 }
 
