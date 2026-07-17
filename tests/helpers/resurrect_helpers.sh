@@ -6,6 +6,8 @@
 _resurrect_helpers_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 # shellcheck source=tests/helpers/sandbox.sh
 source "$_resurrect_helpers_dir/sandbox.sh"
+# Sourcing this file auto-activates the sandbox: HOME/XDG/tmux socket are
+# relocated below, before any resurrect test function runs.
 activate_test_sandbox
 
 # we want "fixed" dimensions no matter the size of real display
