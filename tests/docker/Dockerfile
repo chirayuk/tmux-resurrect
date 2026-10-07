@@ -19,6 +19,7 @@ RUN apt-get update \
 		tar \
 		tmux \
 		vim \
+		zsh \
 	&& rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 10001 tester \

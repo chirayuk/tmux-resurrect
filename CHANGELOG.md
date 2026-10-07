@@ -2,6 +2,10 @@
 
 ### master
 - Remove deprecated "restoring shell history" feature.
+- Panes restored with their contents start `default-shell` as a login shell
+  for any shell, not only bash, when `default-command` is empty.
+- Shell-quote the pane contents file path so session names containing `'`
+  restore their pane contents.
 
 ### v4.0.0, 2022-04-10
 - Proper handling of `automatic-rename` window option.

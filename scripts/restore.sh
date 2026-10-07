@@ -104,15 +104,32 @@ tmux_socket() {
 	echo $TMUX | cut -d',' -f1
 }
 
+# Wraps a value in single quotes for use as one word in a shell command,
+# rewriting each embedded ' as '\'' (close quote, escaped quote, reopen).
+shell_single_quote() {
+	local value="$1"
+	# Pattern and replacement live in variables: inline escaped quotes
+	# in ${var//...} are parsed differently by bash 3.2 and bash 5.
+	local quote="'"
+	local escaped_quote="'\\''"
+	printf "'%s'" "${value//$quote/$escaped_quote}"
+}
+
 # Tmux option stored in a global variable so that we don't have to "ask"
 # tmux server each time.
+#
+# A non-empty default-command is used verbatim. Otherwise the pane must
+# exec default-shell as a login shell, as tmux does for ordinary panes.
+# tmux runs the pane command through `default-shell -c`, so `exec -l`
+# would need that shell's exec builtin to take -l (bash and zsh do, dash
+# and fish don't). Passing -l to the shell itself only needs the shell
+# to accept -l, which bash, zsh, fish, dash, ksh, mksh and tcsh all do.
+# A shell that rejects -l fails visibly rather than silently starting
+# as a non-login shell.
 cache_tmux_default_command() {
 	local default_shell="$(get_tmux_option "default-shell" "")"
-	local opt=""
-	if [ "$(basename "$default_shell")" == "bash" ]; then
-		opt="-l "
-	fi
-	export TMUX_DEFAULT_COMMAND="$(get_tmux_option "default-command" "$opt$default_shell")"
+	local login_shell="$(shell_single_quote "$default_shell") -l"
+	export TMUX_DEFAULT_COMMAND="$(get_tmux_option "default-command" "$login_shell")"
 }
 
 tmux_default_command() {
@@ -120,7 +137,8 @@ tmux_default_command() {
 }
 
 pane_creation_command() {
-	echo "cat '$(pane_contents_file "restore" "${1}:${2}.${3}")'; exec $(tmux_default_command)"
+	local contents_file="$(pane_contents_file "restore" "${1}:${2}.${3}")"
+	echo "cat $(shell_single_quote "$contents_file"); exec $(tmux_default_command)"
 }
 
 new_window() {
