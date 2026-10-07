@@ -2,10 +2,17 @@
 
 # Checks the shell a pane restored WITH pane contents ends up running.
 #
-# Each scenario starts its own tmux server on a dedicated socket
-# (never the default one), writes a one-pane resurrect file plus a
-# pane contents archive, runs scripts/restore.sh against that server
-# and then probes the restored pane by typing a command into it.
+# Each scenario starts its own tmux server on a dedicated socket,
+# writes a one-pane resurrect file plus a pane contents archive, runs
+# scripts/restore.sh against that server and then probes the restored
+# pane by typing a command into it.
+#
+# RUN ONLY IN DOCKER (tests/run_tests_in_docker). The scenarios are
+# isolated, but the shared harness is not: run_tests ends in
+# teardown_helper (tests/helpers/helpers.sh), which runs a bare
+# `tmux kill-server` on the DEFAULT socket and `rm -rf ~/.tmux/`.
+# Run directly on a workstation, that kills the live tmux server and
+# deletes tpm's plugins.
 
 CURRENT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 REPOSITORY_DIR="$( cd "$CURRENT_DIR/.." && pwd )"
