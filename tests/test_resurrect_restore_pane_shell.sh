@@ -7,17 +7,24 @@
 # scripts/restore.sh against that server and then probes the restored
 # pane by typing a command into it.
 #
-# RUN ONLY IN DOCKER (tests/run_tests_in_docker). The scenarios are
-# isolated, but the shared harness is not: run_tests ends in
-# teardown_helper (tests/helpers/helpers.sh), which runs a bare
-# `tmux kill-server` on the DEFAULT socket and `rm -rf ~/.tmux/`.
-# Run directly on a workstation, that kills the live tmux server and
-# deletes tpm's plugins.
+# Run it with tests/run_tests_in_docker: Docker is the supported way to
+# run this suite. The shared harness is not isolated by itself: run_tests
+# ends in teardown_helper (tests/helpers/helpers.sh), which runs a bare
+# `tmux kill-server` on the default socket and `rm -rf ~/.tmux/`. This
+# file therefore activates the test sandbox (tests/helpers/sandbox.sh)
+# before anything else, relocating HOME, XDG_* and TMUX_TMPDIR into a
+# temp directory so that kill-server and rm -rf hit the sandbox rather
+# than a real login. That guard is not a substitute for Docker: runs
+# outside it are not verified.
 
 CURRENT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 REPOSITORY_DIR="$( cd "$CURRENT_DIR/.." && pwd )"
 
+# shellcheck source=tests/helpers/helpers.sh
 source "$CURRENT_DIR/helpers/helpers.sh"
+# shellcheck source=tests/helpers/sandbox.sh
+source "$CURRENT_DIR/helpers/sandbox.sh"
+activate_test_sandbox
 
 # Every scenario gets a fresh socket name: kill-server returns before
 # the server has exited, so reusing a name races the dying server.
@@ -43,9 +50,12 @@ stop_test_server() {
 	isolated_tmux kill-server >/dev/null 2>&1
 }
 
+# Replaces the sandbox's EXIT trap, so it must end by removing the
+# sandbox itself.
 cleanup() {
 	stop_test_server
 	rm -rf "${TEST_DIR:?}"
+	cleanup_test_sandbox
 }
 trap cleanup EXIT
 

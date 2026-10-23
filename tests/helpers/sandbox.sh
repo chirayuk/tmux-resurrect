@@ -10,14 +10,23 @@
 # `activate_test_sandbox` relocates every path the harness and the plugin
 # can touch into a disposable temp directory, so a test run can NEVER reach
 # real user state. It is sourced and invoked by every resurrect test (via
-# resurrect_helpers.sh), which means the guarantee holds no matter how the
-# test is launched: the Docker entrypoint, tests/run_tests_in_isolation on a
-# host, or a test file run directly.
+# resurrect_helpers.sh, or directly by a test that does not use those
+# helpers), which means the guarantee holds no matter how the test is
+# launched: the Docker entrypoint, tests/run_tests_in_isolation on a host,
+# or a test file run directly.
+#
+# activate_test_sandbox installs `trap cleanup_test_sandbox EXIT` to remove
+# the sandbox when the test exits. A test that installs its own EXIT trap
+# replaces that one, so its trap MUST call cleanup_test_sandbox (after its
+# own steps), or the sandbox directory is left behind.
 
-# Remembers the sandbox root so the EXIT trap can remove it.
+# Remembers the sandbox root so cleanup_test_sandbox can remove it.
 _RESURRECT_TEST_SANDBOX_ROOT=""
 
-_resurrect_test_sandbox_cleanup() {
+# Removes the sandbox root (only if it is clearly a temp directory) and
+# forgets it. Safe to call more than once and before activation. Public:
+# call it from any EXIT trap a test installs over the sandbox's own.
+cleanup_test_sandbox() {
 	[ -n "$_RESURRECT_TEST_SANDBOX_ROOT" ] || return 0
 	# Normalize TMPDIR once: an unset TMPDIR must not collapse the allowlist
 	# arm to the bare `/*` glob (which would match any absolute path).
@@ -67,8 +76,10 @@ activate_test_sandbox() {
 	fi
 	_RESURRECT_TEST_SANDBOX_ROOT="$sandbox_root"
 	# The tmux-test framework installs no EXIT trap (teardown is explicit via
-	# exit_helper), so this trap does not clobber one; revisit if that changes.
-	trap _resurrect_test_sandbox_cleanup EXIT
+	# exit_helper), so this trap does not clobber one. A test that sets its
+	# own EXIT trap later replaces this one and must call
+	# cleanup_test_sandbox from it.
+	trap cleanup_test_sandbox EXIT
 
 	local sandbox_home="$sandbox_root/home"
 
