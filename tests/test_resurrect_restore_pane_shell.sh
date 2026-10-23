@@ -13,25 +13,32 @@
 # `tmux kill-server` on the default socket and `rm -rf ~/.tmux/`. This
 # file therefore activates the test sandbox (tests/helpers/sandbox.sh)
 # before anything else, relocating HOME, XDG_* and TMUX_TMPDIR into a
-# temp directory so that kill-server and rm -rf hit the sandbox rather
-# than a real login. That guard is not a substitute for Docker: runs
-# outside it are not verified.
+# temp directory (and clearing inherited TMUX and shell startup
+# variables) so that kill-server and rm -rf hit the sandbox rather than
+# a real login. All scratch files live inside the sandbox root too. That
+# guard is not a substitute for Docker: runs outside it are not
+# verified.
 
 CURRENT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 REPOSITORY_DIR="$( cd "$CURRENT_DIR/.." && pwd )"
 
 # shellcheck source=tests/helpers/helpers.sh
-source "$CURRENT_DIR/helpers/helpers.sh"
+source "$CURRENT_DIR/helpers/helpers.sh" || exit 1
 # shellcheck source=tests/helpers/sandbox.sh
-source "$CURRENT_DIR/helpers/sandbox.sh"
-activate_test_sandbox
+source "$CURRENT_DIR/helpers/sandbox.sh" || exit 1
+activate_test_sandbox || exit 1
 
 # Every scenario gets a fresh socket name: kill-server returns before
 # the server has exited, so reusing a name races the dying server.
 SOCKET_PREFIX="resurrect-pane-shell-test-$$"
 SERVER_COUNT=0
 SOCKET_NAME=""
-TEST_DIR="$(mktemp -d)"
+# Inside the sandbox root, so cleanup_test_sandbox removes it.
+TEST_DIR="$_RESURRECT_TEST_SANDBOX_ROOT/pane-shell"
+if ! mkdir -p "$TEST_DIR"; then
+	echo "could not create test directory $TEST_DIR" >&2
+	exit 1
+fi
 RESURRECT_DIR="$TEST_DIR/resurrect"
 PROBE_DIR="$TEST_DIR/probes"
 CONTENTS_MARKER="restored-pane-contents-marker"
@@ -51,21 +58,34 @@ stop_test_server() {
 }
 
 # Replaces the sandbox's EXIT trap, so it must end by removing the
-# sandbox itself.
+# sandbox itself (which holds TEST_DIR).
 cleanup() {
 	stop_test_server
-	rm -rf "${TEST_DIR:?}"
 	cleanup_test_sandbox
 }
 trap cleanup EXIT
 
 # zsh startup files live in a private ZDOTDIR: an empty .zshrc keeps
-# zsh-newuser-install quiet and skip_global_compinit avoids Ubuntu's
-# compinit prompt about the world-writable test HOME.
+# zsh-newuser-install quiet. skip_global_compinit skips the compinit in
+# Ubuntu's /etc/zsh/zshrc, which the probes do not need. It was added
+# against an insecure-directories prompt seen under the old world-
+# writable Docker HOME; a Docker probe under the sandbox HOME (and under
+# a world-writable one) showed no prompt with or without it, so it is
+# kept only as a cheap guard.
 write_zsh_startup_files() {
 	mkdir -p "$TEST_DIR/zdotdir"
 	echo 'skip_global_compinit=1' > "$TEST_DIR/zdotdir/.zshenv"
 	: > "$TEST_DIR/zdotdir/.zshrc"
+}
+
+# tmux puts the socket at $TMUX_TMPDIR/tmux-<uid>/<name>; a path over
+# the platform's sun_path limit (104 bytes on macOS) cannot be bound.
+report_server_start_failure() {
+	local socket_path message
+	socket_path="$TMUX_TMPDIR/tmux-$(id -u)/$SOCKET_NAME"
+	message="could not start tmux server on socket $socket_path"
+	message+=" (path length ${#socket_path} bytes)"
+	fail_helper "$message"
 }
 
 start_test_server() {
@@ -76,8 +96,11 @@ start_test_server() {
 	SOCKET_NAME="${SOCKET_PREFIX}-${SERVER_COUNT}"
 	rm -rf "$RESURRECT_DIR" "$PROBE_DIR"
 	mkdir -p "$RESURRECT_DIR" "$PROBE_DIR"
-	ZDOTDIR="$TEST_DIR/zdotdir" isolated_tmux -f /dev/null \
-		new-session -d -s base -x 200 -y 50
+	if ! ZDOTDIR="$TEST_DIR/zdotdir" isolated_tmux -f /dev/null \
+		new-session -d -s base -x 200 -y 50; then
+		report_server_start_failure
+		return 1
+	fi
 	isolated_tmux set-option -g default-shell "$default_shell"
 	isolated_tmux set-option -g default-command "$default_command"
 	isolated_tmux set-option -g @resurrect-capture-pane-contents on
@@ -167,7 +190,7 @@ check_restored_pane_is_login_shell() {
 	local login_test="$2"
 	local session_name="$3"
 	local restored_pane ordinary_pane restored ordinary
-	start_test_server "$default_shell" ""
+	start_test_server "$default_shell" "" || return
 	write_saved_session "$session_name" "$(basename "$default_shell")"
 	run_restore
 	restored_pane="$(restored_pane_id "$session_name")"
@@ -206,7 +229,7 @@ test_session_name_with_quote_and_space_restores_contents() {
 test_non_empty_default_command_is_passed_through() {
 	local session_name="command-session"
 	local restored_pane restored
-	start_test_server /bin/zsh "$MARKER_DEFAULT_COMMAND"
+	start_test_server /bin/zsh "$MARKER_DEFAULT_COMMAND" || return
 	write_saved_session "$session_name" "bash"
 	run_restore
 	restored_pane="$(restored_pane_id "$session_name")"
