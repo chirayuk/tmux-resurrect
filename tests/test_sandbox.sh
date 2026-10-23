@@ -159,14 +159,29 @@ teardown_helper
 set_tmux_conf_helper <<< "sandbox-conf-line"
 printf "sandbox_tmux_conf=%s\n" "$(cat "$HOME/.tmux.conf")"
 '
-# $2: resurrect_helpers.sh; $3: the repository, for scripts/helpers.sh.
+# $2: resurrect_helpers.sh; $3: the repository, for scripts/helpers.sh;
+# $4: "drop-state-dir" removes $HOME/.tmux/resurrect first, so the
+# plugin takes its XDG_DATA_HOME fallback.
 # shellcheck disable=SC2016
 readonly CHILD_PLUGIN_RESURRECT_DIR='
 source "$2" || exit 1
 printf "root=%s\n" "$_RESURRECT_TEST_SANDBOX_ROOT"
+if [ "${4-}" = drop-state-dir ]; then
+	rmdir "$HOME/.tmux/resurrect" || exit 1
+fi
 plugin_dir="$(cd "$3/scripts" &&
 	{ source ./helpers.sh; resurrect_dir; } 2>/dev/null)"
 printf "resurrect_dir=%s\n" "$plugin_dir"
+'
+# Removes the marker, so the sandbox's own EXIT cleanup must refuse.
+# shellcheck disable=SC2016
+readonly CHILD_ACTIVATE_UNMARK_ROOT='
+source "$1" || exit 1
+activate_test_sandbox || exit 1
+root="$_RESURRECT_TEST_SANDBOX_ROOT"
+printf "root=%s\n" "$root"
+rm -f "$root/.tmux-resurrect-test-sandbox" || exit 1
+printf "reached=after-unmark\n"
 '
 # $2: the root to hand to cleanup_test_sandbox.
 # shellcheck disable=SC2016
@@ -387,6 +402,66 @@ test_activation_refuses_preexisting_exit_trap() {
 		"$CHILD_PRESET_EXIT_TRAP"
 }
 
+# An exported root variable must not turn activation into a no-op that
+# leaves the real HOME and TMUX in place.
+test_inherited_root_variable_aborts_activation() {
+	expect_activation_aborts "inherited bogus root" \
+		"stale/inherited sandbox root" \
+		"_RESURRECT_TEST_SANDBOX_ROOT=$OUTER_DIR/fake" -- \
+		"$CHILD_ACTIVATE_ONLY"
+}
+
+# Even a genuine, marked root in the base is stale when HOME was never
+# moved into it.
+test_inherited_marked_root_with_outer_home_aborts_activation() {
+	local marked_root
+	reset_outer_dir
+	if ! marked_root="$(make_marked_root)"; then
+		fail_helper "inherited marked root: could not create a root"
+		return
+	fi
+	expect_activation_aborts "inherited marked root" \
+		"stale/inherited sandbox root" \
+		"RESURRECT_TEST_SANDBOX_BASE=$OUTER_DIR" \
+		"_RESURRECT_TEST_SANDBOX_ROOT=$marked_root" -- \
+		"$CHILD_ACTIVATE_ONLY"
+}
+
+test_relative_sandbox_base_aborts_activation() {
+	expect_activation_aborts "relative base" "sandbox base" \
+		"RESURRECT_TEST_SANDBOX_BASE=relative-sandbox-base" -- \
+		"$CHILD_ACTIVATE_ONLY"
+}
+
+# A trailing slash on the base is normalized away: the root lands
+# directly in /tmp and the EXIT trap still removes it.
+test_trailing_slash_base_activates_and_cleans_up() {
+	local report root
+	reset_outer_dir
+	report="$(run_child "RESURRECT_TEST_SANDBOX_BASE=/tmp/" -- \
+		"$CHILD_ACTIVATE_ONLY" 2>&1)"
+	root="$(report_field root "$report")"
+	expect_equal "/tmp" "${root%/*}" "trailing-slash base: root parent"
+	expect_root_removed "$report" root "trailing-slash base"
+}
+
+# A cleanup refusal in the sandbox's own EXIT trap must fail the test.
+# The base is this file's scratch dir, so the refused root stays inside
+# this file's own sandbox.
+test_refused_exit_cleanup_fails_the_exit_status() {
+	local output status
+	reset_outer_dir
+	output="$(run_child "RESURRECT_TEST_SANDBOX_BASE=$OUTER_DIR" -- \
+		"$CHILD_ACTIVATE_UNMARK_ROOT" 2>&1)"
+	status=$?
+	expect_equal "after-unmark" "$(report_field reached "$output")" \
+		"refused cleanup: child reached its end"
+	if [ "$status" -eq 0 ]; then
+		fail_helper "refused cleanup: child exited 0 [$output]"
+	fi
+	expect_contains "refusing" "$output" "refused cleanup"
+}
+
 test_activate_twice_keeps_one_root() {
 	local report first_root
 	reset_outer_dir
@@ -445,18 +520,39 @@ test_harness_teardown_leaves_outer_login_intact() {
 	fi
 }
 
-test_plugin_resurrect_dir_resolves_inside_sandbox() {
+# Resolves the plugin's resurrect dir (scripts/helpers.sh) inside a
+# sandboxed child and checks it lands under the root and ends with the
+# expected suffix. $3 is the child's mode ("" or "drop-state-dir").
+expect_plugin_dir_inside_sandbox() {
+	local message="$1"
+	local expected_suffix="$2"
+	local mode="$3"
 	local report root resurrect_dir
 	reset_outer_dir
 	report="$(run_child -- "$CHILD_PLUGIN_RESURRECT_DIR" \
-		"$RESURRECT_HELPER" "$REPOSITORY_DIR" 2>&1)"
+		"$RESURRECT_HELPER" "$REPOSITORY_DIR" "$mode" 2>&1)"
 	root="$(report_field root "$report")"
 	resurrect_dir="$(report_field resurrect_dir "$report")"
 	if [ -z "$root" ] || [ -z "$resurrect_dir" ]; then
-		fail_helper "plugin dir: incomplete child report [$report]"
+		fail_helper "$message: incomplete child report [$report]"
 		return
 	fi
-	expect_under_root "$resurrect_dir" "$root" "plugin dir"
+	expect_under_root "$resurrect_dir" "$root" "$message"
+	case "$resurrect_dir" in
+		*"$expected_suffix") ;;
+		*) fail_helper "$message: [$resurrect_dir] not *$expected_suffix" ;;
+	esac
+}
+
+test_plugin_resurrect_dir_resolves_inside_sandbox() {
+	expect_plugin_dir_inside_sandbox "plugin dir" "/.tmux/resurrect" ""
+}
+
+# The original incident: with no ~/.tmux/resurrect the plugin falls back
+# to $XDG_DATA_HOME/tmux/resurrect, which must also be the sandbox's.
+test_plugin_xdg_fallback_dir_resolves_inside_sandbox() {
+	expect_plugin_dir_inside_sandbox "plugin XDG fallback dir" \
+		"/.local/share/tmux/resurrect" "drop-state-dir"
 }
 
 # True when a path is inside a temp location (for the TMPDIR values
@@ -511,9 +607,10 @@ expect_cleanup_refuses_work_tree_dir() {
 	rmdir "$keep_dir" 2>/dev/null
 }
 
-# A directory named and marked exactly like a sandbox root, inside this
-# file's own sandbox (so under a temp location: only the identity checks
-# can refuse it).
+# A directory named and marked exactly like a sandbox root, created in
+# $OUTER_DIR (inside this file's own sandbox). Cases that pass
+# RESURRECT_TEST_SANDBOX_BASE=$OUTER_DIR make the location check pass,
+# so only the identity check under test can refuse it.
 make_marked_root() {
 	local root
 	root="$(mktemp -d "$OUTER_DIR/tmux-resurrect-test.XXXXXX")" || return 1
@@ -521,6 +618,39 @@ make_marked_root() {
 	printf '%s\n' "$root"
 }
 
+# Positive control for the identity cases below: with the base set to
+# $OUTER_DIR, a marked root there IS removed, so their refusals are down
+# to the one property each breaks.
+test_cleanup_removes_marked_root_in_base() {
+	local marked_root output
+	reset_outer_dir
+	if ! marked_root="$(make_marked_root)"; then
+		fail_helper "marked root in base: could not create a root"
+		return
+	fi
+	output="$(run_child "RESURRECT_TEST_SANDBOX_BASE=$OUTER_DIR" -- \
+		"$CHILD_CLEANUP_ROOT" "$marked_root" 2>&1)"
+	if [ -e "$marked_root" ]; then
+		fail_helper "marked root in base: not removed [$output]"
+	fi
+}
+
+test_cleanup_refuses_marked_root_outside_base() {
+	local marked_root
+	reset_outer_dir
+	if ! marked_root="$(make_marked_root)"; then
+		fail_helper "root outside base: could not create a root"
+		return
+	fi
+	# The default base (/tmp) is not $OUTER_DIR.
+	expect_cleanup_refuses_root "root outside base" \
+		"$marked_root" "$marked_root/$SANDBOX_MARKER" \
+		-u RESURRECT_TEST_SANDBOX_BASE
+}
+
+# The TMPDIR variants are regression guards: cleanup no longer consults
+# TMPDIR at all, but an earlier allowlist did, and TMPDIR=/ collapsed it
+# to `/*` and removed this very directory.
 test_cleanup_refuses_non_temp_root() {
 	reset_outer_dir
 	mkdir -p "$OUTER_DIR/tmpdir"
@@ -553,8 +683,10 @@ test_cleanup_refuses_dot_dot_root() {
 		fail_helper "dot-dot root: precondition: $dotted_root unresolved"
 		return
 	fi
+	# The base is spelt the same way, so only the `..` check refuses.
 	expect_cleanup_refuses_root "dot-dot root" \
-		"$dotted_root" "$marked_root/$SANDBOX_MARKER"
+		"$dotted_root" "$marked_root/$SANDBOX_MARKER" \
+		"RESURRECT_TEST_SANDBOX_BASE=${dotted_root%/*}"
 }
 
 test_cleanup_refuses_unmarked_root() {
@@ -566,7 +698,8 @@ test_cleanup_refuses_unmarked_root() {
 		return
 	fi
 	expect_cleanup_refuses_root "unmarked root" \
-		"$unmarked_root" "$unmarked_root"
+		"$unmarked_root" "$unmarked_root" \
+		"RESURRECT_TEST_SANDBOX_BASE=$OUTER_DIR"
 }
 
 test_cleanup_refuses_symlinked_root() {
@@ -581,20 +714,39 @@ test_cleanup_refuses_symlinked_root() {
 		fail_helper "symlinked root: could not create $link_root"
 		return
 	fi
-	expect_cleanup_refuses_root "symlinked root" "$link_root" "$link_root"
+	expect_cleanup_refuses_root "symlinked root" "$link_root" "$link_root" \
+		"RESURRECT_TEST_SANDBOX_BASE=$OUTER_DIR"
 	if [ ! -f "$marked_root/$SANDBOX_MARKER" ]; then
 		fail_helper "symlinked root: link target was emptied"
 	fi
 }
 
+# Prints the number of the first line of $2 matching the extended regex
+# $1; prints nothing when no line matches.
+first_matching_line() {
+	local pattern="$1"
+	local file="$2"
+	local match
+	match="$(\grep -En -m 1 "$pattern" "$file")" || return 0
+	printf '%s\n' "${match%%:*}"
+}
+
 # Static guard: a test file activates the sandbox when it calls
-# activate_test_sandbox or sources resurrect_helpers.sh (which does).
-# Commented-out lines do not count.
+# activate_test_sandbox or sources resurrect_helpers.sh (which does),
+# before its first top-level `run_tests` or `main` call (where the
+# harness teardown runs). Commented-out lines do not count.
 file_activates_sandbox() {
 	local file="$1"
 	local activation='activate_test_sandbox([[:space:]]|$)'
 	local helpers_source='source[[:space:]].*helpers/resurrect_helpers\.sh'
-	\grep -Eq "^[[:space:]]*(${activation}|${helpers_source})" "$file"
+	local activation_line run_line
+	activation_line="$(first_matching_line \
+		"^[[:space:]]*(${activation}|${helpers_source})" "$file")"
+	[ -n "$activation_line" ] || return 1
+	run_line="$(first_matching_line \
+		'^(run_tests|main)([[:space:]]|$)' "$file")"
+	[ -z "$run_line" ] && return 0
+	[ "$activation_line" -lt "$run_line" ]
 }
 
 is_sandbox_exempt() {
@@ -616,17 +768,29 @@ expect_test_file_sandboxed() {
 }
 
 # Every test file must activate the sandbox, except the named exemptions.
+# Same glob as the Docker entrypoint's default (tests/test*.sh).
 test_every_test_file_activates_sandbox() {
 	local file
-	for file in "$CURRENT_DIR"/test_*.sh; do
+	for file in "$CURRENT_DIR"/test*.sh; do
 		expect_test_file_sandboxed "$file"
 	done
 }
 
+expect_static_guard_verdict() {
+	local expected="$1"
+	local label="$2"
+	local file="$3"
+	local verdict=rejects
+	file_activates_sandbox "$file" && verdict=accepts
+	expect_equal "$expected" "$verdict" "static guard: $label"
+}
+
 # The static guard itself must flag a file that only sources the
-# harness, and must not be fooled by a commented-out activation.
+# harness, one that activates only after run_tests (where teardown has
+# already run), and must not be fooled by a commented-out activation.
 test_static_guard_flags_missing_activation() {
-	local violating="$OUTER_DIR/test_violating.sh"
+	local commented="$OUTER_DIR/test_commented.sh"
+	local late="$OUTER_DIR/test_late.sh"
 	local complying="$OUTER_DIR/test_complying.sh"
 	reset_outer_dir
 	# Literal file content: nothing here is meant to expand.
@@ -634,18 +798,26 @@ test_static_guard_flags_missing_activation() {
 	printf '%s\n' \
 		'source "$CURRENT_DIR/helpers/helpers.sh"' \
 		'# activate_test_sandbox' \
-		'run_tests' > "$violating"
+		'run_tests' > "$commented"
+	# shellcheck disable=SC2016
+	printf '%s\n' \
+		'source "$CURRENT_DIR/helpers/helpers.sh"' \
+		'run_tests' \
+		'activate_test_sandbox || exit 1' > "$late"
 	# shellcheck disable=SC2016
 	printf '%s\n' \
 		'source "$CURRENT_DIR/helpers/helpers.sh"' \
 		'activate_test_sandbox || exit 1' \
-		'run_tests' > "$complying"
-	if file_activates_sandbox "$violating"; then
-		fail_helper "static guard: missed a file lacking activation"
-	fi
-	if ! file_activates_sandbox "$complying"; then
-		fail_helper "static guard: rejected a file that activates"
-	fi
+		'main() {' \
+		'	run_tests' \
+		'}' \
+		'main' > "$complying"
+	expect_static_guard_verdict rejects "commented-out activation" \
+		"$commented"
+	expect_static_guard_verdict rejects "activation after run_tests" \
+		"$late"
+	expect_static_guard_verdict accepts "activation before main" \
+		"$complying"
 }
 
 main() {

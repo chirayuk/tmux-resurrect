@@ -58,10 +58,11 @@ stop_test_server() {
 }
 
 # Replaces the sandbox's EXIT trap, so it must end by removing the
-# sandbox itself (which holds TEST_DIR).
+# sandbox itself (which holds TEST_DIR); a refused or failed removal
+# fails the test.
 cleanup() {
 	stop_test_server
-	cleanup_test_sandbox
+	cleanup_test_sandbox || exit 1
 }
 trap cleanup EXIT
 

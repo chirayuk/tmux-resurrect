@@ -25,19 +25,27 @@
 # entrypoint, tests/run_tests_in_isolation on a host, or a test file run
 # directly.
 #
-# activate_test_sandbox installs `trap cleanup_test_sandbox EXIT` to remove
-# the sandbox when the test exits, and refuses to run if an EXIT trap is
-# already set. A test that installs its own EXIT trap afterwards replaces
-# the sandbox's, so its trap MUST call cleanup_test_sandbox (after its own
-# steps), or the sandbox directory is left behind.
+# activate_test_sandbox installs `trap 'cleanup_test_sandbox || exit 1'
+# EXIT` to remove the sandbox when the test exits (a refused or failed
+# removal fails the test), and refuses to run if an EXIT trap is already
+# set. A test that installs its own EXIT trap afterwards replaces the
+# sandbox's, so its trap MUST end with `cleanup_test_sandbox || exit 1`,
+# or the sandbox directory is left behind.
 #
-# RESURRECT_TEST_SANDBOX_BASE (test-only): the directory the sandbox root
-# is created in; defaults to /tmp. A short fixed base keeps tmux socket
-# paths under the sun_path limit. Only tests/test_sandbox.sh sets it, to
-# simulate a mktemp failure.
+# The sandbox root is created directly in a fixed base, /tmp, rather
+# than in TMPDIR: the tmux socket lives under the root, and a long base
+# (macOS's /var/folders/... TMPDIR) pushes socket paths past the 104-byte
+# sun_path limit. Where /tmp is not writable, activation fails closed
+# with a loud mktemp error rather than falling back anywhere else.
+#
+# RESURRECT_TEST_SANDBOX_BASE (test-only): overrides that base. It must
+# be an absolute path with no `.`, `..` or empty component (trailing
+# slashes are stripped). Only tests/test_sandbox.sh sets it.
 
 # Remembers the sandbox root so cleanup_test_sandbox can remove it.
-# Preserved across re-sourcing, so a nested source keeps the guard.
+# Preserved across re-sourcing, so a nested source keeps the guard; an
+# inherited value that does not describe the live sandbox is rejected by
+# activate_test_sandbox.
 _RESURRECT_TEST_SANDBOX_ROOT="${_RESURRECT_TEST_SANDBOX_ROOT-}"
 
 # Written into every sandbox root at activation; cleanup removes only a
@@ -57,15 +65,44 @@ _resurrect_test_sandbox_has_root_name() {
 # Absolute, with no `..`, `.` or empty component, so the path names
 # exactly the directory it appears to.
 _resurrect_test_sandbox_is_plain_absolute() {
-	local root="$1"
-	case "$root" in
+	local path="$1"
+	case "$path" in
 		/*) ;;
 		*) return 1 ;;
 	esac
-	case "$root/" in
+	case "$path/" in
 		*/../*|*/./*|*//*) return 1 ;;
 	esac
 	return 0
+}
+
+# Prints the base the sandbox root lives in, trailing slashes stripped.
+# Not validated here: see _resurrect_test_sandbox_valid_base.
+_resurrect_test_sandbox_base() {
+	local base="${RESURRECT_TEST_SANDBOX_BASE:-/tmp}"
+	while [ "$base" != "${base%/}" ]; do
+		base="${base%/}"
+	done
+	printf '%s\n' "$base"
+}
+
+# Prints the normalized base, or fails loudly when it is not a plain
+# absolute path (a relative base would put the root wherever cwd is).
+_resurrect_test_sandbox_valid_base() {
+	local base
+	base="$(_resurrect_test_sandbox_base)"
+	if ! _resurrect_test_sandbox_is_plain_absolute "$base"; then
+		printf 'sandbox: sandbox base is not a plain absolute path: %s\n' \
+			"${RESURRECT_TEST_SANDBOX_BASE-}" >&2
+		return 1
+	fi
+	printf '%s\n' "$base"
+}
+
+# The root must sit directly in the (normalized) sandbox base.
+_resurrect_test_sandbox_is_in_base() {
+	local root="$1"
+	[ "${root%/*}" = "$(_resurrect_test_sandbox_base)" ]
 }
 
 # A real directory (not a symlink to one) carrying the sandbox marker.
@@ -80,7 +117,18 @@ _resurrect_test_sandbox_is_removable_root() {
 	local root="$1"
 	_resurrect_test_sandbox_has_root_name "$root" &&
 		_resurrect_test_sandbox_is_plain_absolute "$root" &&
+		_resurrect_test_sandbox_is_in_base "$root" &&
 		_resurrect_test_sandbox_is_marked_dir "$root"
+}
+
+# True when the stored root is a genuine sandbox root AND this shell's
+# HOME and TMUX_TMPDIR actually point into it, i.e. the sandbox is live
+# here rather than a value inherited from some other process.
+_resurrect_test_sandbox_is_live() {
+	local root="$_RESURRECT_TEST_SANDBOX_ROOT"
+	_resurrect_test_sandbox_is_removable_root "$root" &&
+		[ "${HOME-}" = "$root/home" ] &&
+		[ "${TMUX_TMPDIR-}" = "$root/tmux" ]
 }
 
 # rm -rf can fail with ENOTEMPTY while a dying tmux pane still writes
@@ -148,36 +196,52 @@ _resurrect_test_sandbox_assert() {
 	fi
 }
 
-# Creates the sandbox root and its marker; exits loudly on failure.
+# Creates the sandbox root and its marker; fails loudly (non-zero) on
+# any error. Run in a command substitution, so it returns, not exits.
 _resurrect_test_sandbox_create_root() {
-	local base="${RESURRECT_TEST_SANDBOX_BASE:-/tmp}"
-	local sandbox_root
+	local base sandbox_root
+	base="$(_resurrect_test_sandbox_valid_base)" || return 1
 	# Fail loudly on mktemp failure BEFORE deriving any path: the tests run
 	# with neither `set -e` nor `set -u`, so an empty sandbox_root would
 	# otherwise make HOME collapse to "/home".
 	sandbox_root="$(mktemp -d "$base/tmux-resurrect-test.XXXXXX")"
 	if [ ! -d "$sandbox_root" ]; then
 		printf 'sandbox: mktemp -d failed to create a sandbox root\n' >&2
-		exit 1
+		return 1
 	fi
 	if ! : > "$sandbox_root/$_RESURRECT_TEST_SANDBOX_MARKER"; then
 		printf 'sandbox: could not mark sandbox root %s\n' \
 			"$sandbox_root" >&2
-		exit 1
+		# Still empty: mktemp just made it and the marker never landed.
+		rmdir "$sandbox_root"
+		return 1
 	fi
 	printf '%s\n' "$sandbox_root"
 }
 
+# Idempotent: a nested source must not create a second sandbox. But a
+# root value alone is not proof of a sandbox (it may be inherited from
+# the environment), so a set value that is not live here fails loudly.
+# Returns 0 when this shell already has a live sandbox, 1 when it has
+# none yet.
+_resurrect_test_sandbox_is_already_active() {
+	[ -n "$_RESURRECT_TEST_SANDBOX_ROOT" ] || return 1
+	_resurrect_test_sandbox_is_live && return 0
+	printf 'sandbox: stale/inherited sandbox root %s %s\n' \
+		"$_RESURRECT_TEST_SANDBOX_ROOT" \
+		"(HOME and TMUX_TMPDIR are not inside it); refusing to run" >&2
+	exit 1
+}
+
 activate_test_sandbox() {
-	# Idempotent: a nested source must not create a second sandbox.
-	[ -n "$_RESURRECT_TEST_SANDBOX_ROOT" ] && return 0
+	_resurrect_test_sandbox_is_already_active && return 0
 	_resurrect_test_sandbox_assert_no_exit_trap
 
 	local outer_home="${HOME-}"
 	local sandbox_root
 	sandbox_root="$(_resurrect_test_sandbox_create_root)" || exit 1
 	_RESURRECT_TEST_SANDBOX_ROOT="$sandbox_root"
-	trap cleanup_test_sandbox EXIT
+	trap 'cleanup_test_sandbox || exit 1' EXIT
 
 	local sandbox_home="$sandbox_root/home"
 
